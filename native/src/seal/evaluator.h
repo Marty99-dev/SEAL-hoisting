@@ -984,6 +984,7 @@ namespace seal
         @throws std::logic_error if keyswitching is not supported by the context
         @throws std::logic_error if result ciphertext is transparent
         */
+        void apply_galois_automorphism(Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp) const;
         void apply_galois_inplace(
             Ciphertext &encrypted, std::uint32_t galois_elt, const GaloisKeys &galois_keys,
             MemoryPoolHandle pool = MemoryManager::GetPool()) const;

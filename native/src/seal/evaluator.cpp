@@ -2359,21 +2359,8 @@ namespace seal
 #endif
     }
 
-    void Evaluator::apply_galois_inplace(
-        Ciphertext &encrypted, uint32_t galois_elt, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
+    void Evaluator::apply_galois_automorphism(Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp) const
     {
-        // Verify parameters.
-        if (!is_metadata_valid_for(encrypted, context_) || !is_buffer_valid(encrypted))
-        {
-            throw invalid_argument("encrypted is not valid for encryption parameters");
-        }
-
-        // Don't validate all of galois_keys but just check the parms_id.
-        if (galois_keys.parms_id() != context_.key_parms_id())
-        {
-            throw invalid_argument("galois_keys is not valid for encryption parameters");
-        }
-
         auto &context_data = *context_.get_context_data(encrypted.parms_id());
         auto &parms = context_data.parms();
         auto &coeff_modulus = parms.coeff_modulus();
@@ -2383,31 +2370,6 @@ namespace seal
         // Use key_context_data where permutation tables exist since previous runs.
         auto galois_tool = context_.key_context_data()->galois_tool();
 
-        // Size check
-        if (!product_fits_in(coeff_count, coeff_modulus_size))
-        {
-            throw logic_error("invalid parameters");
-        }
-
-        // Check if Galois key is generated or not.
-        if (!galois_keys.has_key(galois_elt))
-        {
-            throw invalid_argument("Galois key not present");
-        }
-
-        uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
-
-        // Verify parameters
-        if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
-        {
-            throw invalid_argument("Galois element is not valid");
-        }
-        if (encrypted_size > 2)
-        {
-            throw invalid_argument("encrypted size must be 2");
-        }
-
-        SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
 
         // DO NOT CHANGE EXECUTION ORDER OF FOLLOWING SECTION
         // BEGIN: Apply Galois for each ciphertext
@@ -2448,6 +2410,105 @@ namespace seal
         // Wipe encrypted.data(1)
         set_zero_poly(coeff_count, coeff_modulus_size, encrypted.data(1));
 
+    }
+
+    void Evaluator::apply_galois_inplace(
+        Ciphertext &encrypted, uint32_t galois_elt, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
+    {
+
+        // Verify parameters.
+        if (!is_metadata_valid_for(encrypted, context_) || !is_buffer_valid(encrypted))
+        {
+            throw invalid_argument("encrypted is not valid for encryption parameters");
+        }
+
+        // Don't validate all of galois_keys but just check the parms_id.
+        if (galois_keys.parms_id() != context_.key_parms_id())
+        {
+            throw invalid_argument("galois_keys is not valid for encryption parameters");
+        }
+
+
+        auto &context_data = *context_.get_context_data(encrypted.parms_id());
+        auto &parms = context_data.parms();
+        auto &coeff_modulus = parms.coeff_modulus();
+
+        size_t coeff_count = parms.poly_modulus_degree();
+        size_t coeff_modulus_size = coeff_modulus.size();
+        size_t encrypted_size = encrypted.size();
+
+        // Size check
+        if (!product_fits_in(coeff_count, coeff_modulus_size))
+        {
+            throw logic_error("invalid parameters");
+        }
+
+        // Check if Galois key is generated or not.
+        if (!galois_keys.has_key(galois_elt))
+        {
+            throw invalid_argument("Galois key not present");
+        }
+
+        uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
+
+        // Verify parameters
+        if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
+        {
+            throw invalid_argument("Galois element is not valid");
+        }
+        if (encrypted_size > 2)
+        {
+            throw invalid_argument("encrypted size must be 2");
+        }
+
+        SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
+
+        // apply_galois_automorphism(encrypted, galois_elt, temp); //  TODO: Uncomment
+        // Use key_context_data where permutation tables exist since previous runs.
+        auto galois_tool = context_.key_context_data()->galois_tool();
+
+
+        // DO NOT CHANGE EXECUTION ORDER OF FOLLOWING SECTION
+        // BEGIN: Apply Galois for each ciphertext
+        // Execution order is sensitive, since apply_galois is not inplace!
+        if (parms.scheme() == scheme_type::bfv)
+        {
+            // !!! DO NOT CHANGE EXECUTION ORDER!!!
+
+            // First transform encrypted.data(0)
+            auto encrypted_iter = iter(encrypted);
+            galois_tool->apply_galois(encrypted_iter[0], coeff_modulus_size, galois_elt, coeff_modulus, temp);
+
+            // Copy result to encrypted.data(0)
+            set_poly(temp, coeff_count, coeff_modulus_size, encrypted.data(0));
+
+            // Next transform encrypted.data(1)
+            galois_tool->apply_galois(encrypted_iter[1], coeff_modulus_size, galois_elt, coeff_modulus, temp);
+        }
+        else if (parms.scheme() == scheme_type::ckks || parms.scheme() == scheme_type::bgv)
+        {
+            // !!! DO NOT CHANGE EXECUTION ORDER!!!
+
+            // First transform encrypted.data(0)
+            auto encrypted_iter = iter(encrypted);
+            galois_tool->apply_galois_ntt(encrypted_iter[0], coeff_modulus_size, galois_elt, temp);
+
+            // Copy result to encrypted.data(0)
+            set_poly(temp, coeff_count, coeff_modulus_size, encrypted.data(0));
+
+            // Next transform encrypted.data(1)
+            galois_tool->apply_galois_ntt(encrypted_iter[1], coeff_modulus_size, galois_elt, temp);
+        }
+        else
+        {
+            throw logic_error("scheme not implemented");
+        }
+
+        // Wipe encrypted.data(1)
+        set_zero_poly(coeff_count, coeff_modulus_size, encrypted.data(1));
+
+
+        // TODO: Automomprhis
         // END: Apply Galois for each ciphertext
         // REORDERING IS SAFE NOW
 
