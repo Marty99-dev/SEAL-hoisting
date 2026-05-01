@@ -4214,6 +4214,35 @@ namespace sealtest
                 ASSERT_EQ(input[i].real(), round(output[i].real()));
                 ASSERT_EQ(-input[i].imag(), round(output[i].imag()));
             }
+
+            // -------------------------
+            // NEW: rotate_vector_many test
+            // -------------------------
+
+            vector<int> shifts = { 1, 2, 3 };
+            vector<Ciphertext> results;
+
+            encoder.encode(input, context.first_parms_id(), delta, plain);
+            encryptor.encrypt(plain, encrypted);
+
+            evaluator.rotate_vector_many(encrypted, shifts, glk, results);
+
+            ASSERT_EQ(results.size(), shifts.size());
+
+            for (size_t s = 0; s < shifts.size(); s++)
+            {
+                decryptor.decrypt(results[s], plain);
+                encoder.decode(plain, output);
+
+                int shift = shifts[s];
+
+                for (size_t i = 0; i < slot_size; i++)
+                {
+                    ASSERT_EQ(input[(i + shift) % slot_size].real(), round(output[i].real()));
+
+                    ASSERT_EQ(input[(i + shift) % slot_size].imag(), round(output[i].imag()));
+                }
+            }
         }
         {
             size_t slot_size = 32;

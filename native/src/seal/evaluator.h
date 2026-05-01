@@ -956,6 +956,12 @@ namespace seal
             transform_from_ntt_inplace(destination);
         }
 
+        // TODO: Add documentation for these two functions
+        void apply_galois_many(
+            const Ciphertext &encrypted, const std::vector<uint32_t> &galois_elts, const GaloisKeys &galois_keys,
+            std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const;
+        void apply_galois_automorphism(Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp) const;
+
         /**
         Applies a Galois automorphism to a ciphertext. To evaluate the Galois automorphism, an appropriate set of Galois
         keys must also be provided. Dynamic memory allocations in the process are allocated from the memory pool pointed
@@ -984,7 +990,6 @@ namespace seal
         @throws std::logic_error if keyswitching is not supported by the context
         @throws std::logic_error if result ciphertext is transparent
         */
-        void apply_galois_automorphism(Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp) const;
         void apply_galois_inplace(
             Ciphertext &encrypted, std::uint32_t galois_elt, const GaloisKeys &galois_keys,
             MemoryPoolHandle pool = MemoryManager::GetPool()) const;
@@ -1199,6 +1204,19 @@ namespace seal
             rotate_internal(encrypted, steps, galois_keys, std::move(pool));
         }
 
+        // TODO: Write documentation
+        inline void rotate_vector_many(
+            const Ciphertext &encrypted, const std::vector<int> &steps, const GaloisKeys &galois_keys,
+            std::vector<Ciphertext> &destination, MemoryPoolHandle pool = MemoryManager::GetPool()) const
+        {
+            if (context_.key_context_data()->parms().scheme() != scheme_type::ckks)
+            {
+                throw std::logic_error("unsupported scheme");
+            }
+
+            rotate_many_internal(encrypted, steps, galois_keys, destination, std::move(pool));
+        }
+
         /**
         Rotates plaintext vector cyclically. When using the CKKS scheme, this function rotates the encrypted plaintext
         vector cyclically to the left (steps > 0) or to the right (steps < 0) and writes the result to the destination
@@ -1333,6 +1351,10 @@ namespace seal
         void rotate_internal(
             Ciphertext &encrypted, int steps, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const;
 
+        void rotate_many_internal(
+            const Ciphertext &encrypted, const std::vector<int> &steps, const GaloisKeys &galois_keys,
+            std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const;
+
         inline void conjugate_internal(
             Ciphertext &encrypted, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
         {
@@ -1363,6 +1385,12 @@ namespace seal
         void multiply_plain_normal(Ciphertext &encrypted, const Plaintext &plain, MemoryPoolHandle pool) const;
 
         void multiply_plain_ntt(Ciphertext &encrypted_ntt, const Plaintext &plain_ntt) const;
+
+        void apply_galois_kernel(
+            const Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp, util::GaloisTool *galois_tool) const;
+
+        void apply_galois_writeback(
+            Ciphertext &encrypted, util::RNSIter temp, size_t coeff_count, size_t coeff_modulus_size) const;
 
         SEALContext context_;
     };
