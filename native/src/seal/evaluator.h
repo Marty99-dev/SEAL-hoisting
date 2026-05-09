@@ -1320,7 +1320,7 @@ namespace seal
         void switch_key_inplace(
             Ciphertext &encrypted, util::ConstRNSIter target_iter, const KSwitchKeys &kswitch_keys,
             std::size_t key_index, MemoryPoolHandle pool = MemoryManager::GetPool(),
-            std::vector<util::Pointer<uint64_t>> *precomp = nullptr,  bool save_precomp = false) const;
+             std::vector<std::vector<util::Pointer<uint64_t>>> *precomp = nullptr,  bool save_precomp = false) const;
 
         void decompose_ntt(
             util::ConstRNSIter target_iter, std::vector<util::Pointer<std::uint64_t>> &decomp_ntt,

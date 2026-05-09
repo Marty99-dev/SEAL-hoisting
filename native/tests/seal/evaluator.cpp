@@ -4383,7 +4383,7 @@ namespace sealtest
         util::set_zero_poly(coeff_count, coeff_modulus_size, ref_ct.data(0));
         util::set_zero_poly(coeff_count, coeff_modulus_size, ref_ct.data(1));
 
-        std::vector<util::Pointer<uint64_t>> decomp;
+        std::vector<std::vector<util::Pointer<uint64_t>>> decomp;
 
         // Reference computes and exports exact operands
         evaluator.switch_key_inplace(

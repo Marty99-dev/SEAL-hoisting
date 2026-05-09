@@ -2484,13 +2484,17 @@ namespace seal
         std::vector<Pointer<uint64_t>> temp_buffers;
         temp_buffers.reserve(galois_elts.size());
 
-        std::vector<std::vector<util::Pointer<uint64_t>>> all_decomps;
-        all_decomps.reserve(galois_elts.size());
-
         SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
 
         std::vector<Ciphertext> rotated_cts;
         rotated_cts.reserve(galois_elts.size());
+
+        // Precomputed data
+        std::vector<std::vector<util::Pointer<uint64_t>>> decomp;
+
+        // Precompute during the first run
+        bool save_precomp = true;
+
 
         for (auto galois_elt : galois_elts)
         {
@@ -2513,42 +2517,26 @@ namespace seal
             Ciphertext rotated = encrypted;
             apply_galois_automorphism(rotated, galois_elt, temp_iter);
 
-            std::cout << "[Before decompose] temp_iter[0..3]: ";
-            for (size_t k = 0; k < 4; k++)
-            {
-                std::cout << temp_iter[k] << " ";
-            }
-            std::cout << std::endl;
-
-            // 🔥 HOIST: compute decomposition ONCE here
-            std::vector<util::Pointer<uint64_t>> decomp;
-            decompose_ntt(temp_iter, decomp, pool);
 
             // Store everything
             temp_buffers.emplace_back(std::move(temp_buf));
-            all_decomps.emplace_back(std::move(decomp));
             destination.emplace_back(std::move(rotated));
-        }
 
-        for (size_t i = 0; i < galois_elts.size(); i++)
-        {
-            util::RNSIter temp_iter(temp_buffers[i].get(), coeff_count);
+            util::RNSIter temp_iter_new(temp_buffers.back().get(), coeff_count);
 
             switch_key_inplace(
-                destination[i], temp_iter, static_cast<const KSwitchKeys &>(galois_keys),
-                GaloisKeys::get_index(galois_elts[i]), pool);
-            // switch_key_inplace(
-            //     destination[i], temp_iter, static_cast<const KSwitchKeys &>(galois_keys),
-            //     GaloisKeys::get_index(galois_elts[i]), pool,
-            //     &all_decomps[i] // 🔥 THIS is the hoisting
-            // );
+                destination.back(), temp_iter_new, static_cast<const KSwitchKeys &>(galois_keys),
+                GaloisKeys::get_index(galois_elt), pool, &decomp, save_precomp);
+
+            // Only save during the first run
+            save_precomp = false;
         }
     }
 
     // TODO: Remove all params in this code
     void Evaluator::switch_key_inplace(
         Ciphertext &encrypted, ConstRNSIter target_iter, const KSwitchKeys &kswitch_keys, size_t kswitch_keys_index,
-        MemoryPoolHandle pool, std::vector<util::Pointer<uint64_t>> *precomp, bool save_precomp) const
+        MemoryPoolHandle pool, std::vector<std::vector<util::Pointer<uint64_t>>> *precomp, bool save_precomp) const
     {
         auto parms_id = encrypted.parms_id();
         auto &context_data = *context_.get_context_data(parms_id);
@@ -2643,8 +2631,12 @@ namespace seal
 
         if (save_precomp && precomp)
         {
-            precomp->resize(decomp_modulus_size);
-            std::cout << "Resizing to " << decomp_modulus_size << std::endl;
+            precomp->resize(rns_modulus_size);
+
+            for (size_t I = 0; I < rns_modulus_size; I++)
+            {
+                (*precomp)[I].resize(decomp_modulus_size);
+            }
         }
 
         SEAL_ITERATE(iter(size_t(0)), rns_modulus_size, [&](auto I) {
@@ -2678,7 +2670,7 @@ namespace seal
                 {
                     std::cout << "\n[COMPUTING PRECOMP PATH]\n";
 
-                    std::cout << "[REF BEFORE NTT J=" << J << "] ";
+                    std::cout << "[REF BEFORE NTT I, J=" << I << ", " << J << "] ";
                     for (size_t k = 0; k < 4; k++)
                     {
                         std::cout << t_target[J][k] << " ";
@@ -2705,23 +2697,35 @@ namespace seal
                     }
                     std::cout << std::endl;
 
-                    // Save
-
-                    (*precomp)[J] = allocate<uint64_t>(coeff_count, pool);
-                    set_uint(t_operand, coeff_count, (*precomp)[J].get());
-                    std::cout << "Allocating to precomput J = " << J << std::endl;
+                    // Save at [I][J]
+                    (*precomp)[I][J] = allocate<uint64_t>(coeff_count, pool);
+                    set_uint(t_operand, coeff_count, (*precomp)[I][J].get());
+                    std::cout << "Saving done" << std::endl;
                 }
-                else
+                else if (precomp && !save_precomp)
                 {
                     std::cout << "\n[PRECOMP ALREADY COMPUTED PATH]\n";
 
-                    std::cout << "[HOISTED (precomp) J=" << J << "] ";
+                    std::cout << "[HOISTED (precomp) I, J=" << I << "," << J << "] ";
                     for (size_t k = 0; k < 4; k++)
                     {
-                        std::cout << (*precomp)[J].get()[k] << " ";
+                        std::cout << (*precomp)[I][J].get()[k] << " ";
                     }
                     std::cout << std::endl;
-                    t_operand = (*precomp)[J].get();
+                    // Use precomputed value for this (I, J)
+                    t_operand = (*precomp)[I][J].get();
+                }
+                else
+                {
+                    std::cout << "NOT HERE " << std::endl;
+                    // Original non-hoisted path
+                    if (key_modulus[J] <= key_modulus[key_index])
+                        set_uint(t_target[J], coeff_count, t_ntt);
+                    else
+                        modulo_poly_coeffs(t_target[J], coeff_count, key_modulus[key_index], t_ntt);
+
+                    ntt_negacyclic_harvey_lazy(t_ntt, key_ntt_tables[key_index]);
+                    t_operand = t_ntt;
                 }
 
                 // if (I == 0 && J == 0)
