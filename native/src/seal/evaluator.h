@@ -1316,6 +1316,16 @@ namespace seal
         */
         struct EvaluatorPrivateHelper;
 
+        // TODO: Below should be private
+        void switch_key_inplace(
+            Ciphertext &encrypted, util::ConstRNSIter target_iter, const KSwitchKeys &kswitch_keys,
+            std::size_t key_index, MemoryPoolHandle pool = MemoryManager::GetPool(),
+            std::vector<util::Pointer<uint64_t>> *precomp = nullptr,  bool save_precomp = false) const;
+
+        void decompose_ntt(
+            util::ConstRNSIter target_iter, std::vector<util::Pointer<std::uint64_t>> &decomp_ntt,
+            MemoryPoolHandle pool) const;
+
     private:
         Evaluator(const Evaluator &copy) = delete;
 
@@ -1378,16 +1388,13 @@ namespace seal
             apply_galois_inplace(encrypted, galois_tool->get_elt_from_step(0), galois_keys, std::move(pool));
         }
 
-        void switch_key_inplace(
-            Ciphertext &encrypted, util::ConstRNSIter target_iter, const KSwitchKeys &kswitch_keys,
-            std::size_t key_index, MemoryPoolHandle pool = MemoryManager::GetPool()) const;
-
         void multiply_plain_normal(Ciphertext &encrypted, const Plaintext &plain, MemoryPoolHandle pool) const;
 
         void multiply_plain_ntt(Ciphertext &encrypted_ntt, const Plaintext &plain_ntt) const;
 
         void apply_galois_kernel(
-            const Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp, util::GaloisTool *galois_tool) const;
+            const Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp,
+            const util::GaloisTool *galois_tool) const;
 
         void apply_galois_writeback(
             Ciphertext &encrypted, util::RNSIter temp, size_t coeff_count, size_t coeff_modulus_size) const;

@@ -9,6 +9,7 @@
 #include "seal/evaluator.h"
 #include "seal/keygenerator.h"
 #include "seal/modulus.h"
+#include "seal/util/polyarithsmallmod.h" // TODO: Remove
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
@@ -4319,6 +4320,258 @@ namespace sealtest
             }
         }
     }
+
+    TEST(EvaluatorTest, CKKSHoistedVsNonHoistedKeySwitch)
+    {
+        EncryptionParameters parms(scheme_type::ckks);
+        size_t slot_size = 8;
+        parms.set_poly_modulus_degree(slot_size * 2);
+        parms.set_coeff_modulus(CoeffModulus::Create(slot_size * 2, { 40, 40, 40, 40 }));
+
+        SEALContext context(parms, false, sec_level_type::none);
+        KeyGenerator keygen(context);
+
+        PublicKey pk;
+        keygen.create_public_key(pk);
+        GaloisKeys glk;
+        keygen.create_galois_keys(glk);
+
+        Encryptor encryptor(context, pk);
+        Evaluator evaluator(context);
+        Decryptor decryptor(context, keygen.secret_key());
+        CKKSEncoder encoder(context);
+
+        const double delta = static_cast<double>(1ULL << 30);
+
+        vector<complex<double>> input(slot_size);
+        for (size_t i = 0; i < slot_size; i++)
+            input[i] = complex<double>(static_cast<double>(i + 1), static_cast<double>(i + 1));
+
+        Plaintext plain;
+        Ciphertext encrypted;
+        encoder.encode(input, context.first_parms_id(), delta, plain);
+        encryptor.encrypt(plain, encrypted);
+
+        // Convert step count → Galois element
+        int step = 1;
+        auto galois_tool = context.key_context_data()->galois_tool();
+        uint32_t galois_elt = galois_tool->get_elt_from_step(step);
+
+        auto &context_data = *context.get_context_data(encrypted.parms_id());
+        auto &parms_data = context_data.parms();
+        auto &coeff_modulus = parms_data.coeff_modulus();
+        size_t coeff_count = parms_data.poly_modulus_degree();
+        size_t coeff_modulus_size = coeff_modulus.size();
+
+        MemoryPoolHandle pool = MemoryManager::GetPool();
+
+        // ---------------------------------------------------------------- //
+        // Reference path: standard (non-hoisted)                           //
+        // ---------------------------------------------------------------- //
+        Ciphertext ref_ct = encrypted;
+        SEAL_ALLOCATE_GET_RNS_ITER(temp_ref_c1, coeff_count, coeff_modulus_size, pool);
+        SEAL_ALLOCATE_GET_RNS_ITER(temp_ref_c0, coeff_count, coeff_modulus_size, pool);
+
+        auto ref_iter = util::iter(ref_ct);
+
+        // Permute c1 → temp_ref_c1
+        galois_tool->apply_galois_ntt(ref_iter[1], coeff_modulus_size, galois_elt, temp_ref_c1);
+        // Permute c0 → temp_ref_c0
+        galois_tool->apply_galois_ntt(ref_iter[0], coeff_modulus_size, galois_elt, temp_ref_c0);
+
+        // Zero out c1 and c2 before key switch accumulates into it
+        util::set_zero_poly(coeff_count, coeff_modulus_size, ref_ct.data(0));
+        util::set_zero_poly(coeff_count, coeff_modulus_size, ref_ct.data(1));
+
+        std::vector<util::Pointer<uint64_t>> decomp;
+
+        // Reference computes and exports exact operands
+        evaluator.switch_key_inplace(
+            ref_ct, temp_ref_c1, static_cast<const KSwitchKeys &>(glk), GaloisKeys::get_index(galois_elt), pool,
+            &decomp, true);
+
+        std::cout << "decomp empty? " << decomp.empty() << std::endl;
+
+        // TODO: Do we need this one ( and the one below?)
+        ref_iter = util::iter(ref_ct);
+
+        // Add permuted c0 into result c0
+        util::add_poly_coeffmod(temp_ref_c0, ref_iter[0], coeff_modulus_size, coeff_modulus, ref_iter[0]);
+
+        // ---------------------------------------------------------------- //
+        // Hoisted path: precomputed decomposition                          //
+        // ---------------------------------------------------------------- //
+
+        std::cout << "WE ARE HOISTING NOW" << std::endl;
+
+        Ciphertext hoist_ct = encrypted;
+        SEAL_ALLOCATE_GET_RNS_ITER(temp_hoist_c1, coeff_count, coeff_modulus_size, pool);
+        SEAL_ALLOCATE_GET_RNS_ITER(temp_hoist_c0, coeff_count, coeff_modulus_size, pool);
+
+        auto hoist_iter = util::iter(hoist_ct);
+
+        // Permute c1 → temp_hoist_c1
+        galois_tool->apply_galois_ntt(hoist_iter[1], coeff_modulus_size, galois_elt, temp_hoist_c1);
+        // Permute c0 → temp_hoist_c0
+        galois_tool->apply_galois_ntt(hoist_iter[0], coeff_modulus_size, galois_elt, temp_hoist_c0);
+
+        size_t decomp_modulus_size = coeff_modulus_size;
+
+        // Zero out c1 and c2 before key switch accumulates into it
+        util::set_zero_poly(coeff_count, coeff_modulus_size, hoist_ct.data(0));
+        util::set_zero_poly(coeff_count, coeff_modulus_size, hoist_ct.data(1));
+
+        // Key switch using permuted c1 + precomputed decomposition
+        // TODO: Go back to hoisting
+        // Hoisted reuses exact operands
+        evaluator.switch_key_inplace(
+            hoist_ct, temp_hoist_c1, static_cast<const KSwitchKeys &>(glk), GaloisKeys::get_index(galois_elt), pool,
+            &decomp, false);
+
+        // evaluator.switch_key_inplace(
+        //     hoist_ct, temp_hoist_c1, static_cast<const KSwitchKeys &>(glk), GaloisKeys::get_index(galois_elt), pool);
+
+        hoist_iter = util::iter(hoist_ct);
+
+        // Add permuted c0
+        util::add_poly_coeffmod(temp_hoist_c0, hoist_iter[0], coeff_modulus_size, coeff_modulus, hoist_iter[0]);
+
+        // ---------------------------------------------------------------- //
+        // Decrypt and compare                                               //
+        // ---------------------------------------------------------------- //
+        Plaintext ref_plain, hoist_plain;
+        vector<complex<double>> ref_out(slot_size), hoist_out(slot_size);
+
+        decryptor.decrypt(ref_ct, ref_plain);
+        decryptor.decrypt(hoist_ct, hoist_plain);
+        encoder.decode(ref_plain, ref_out);
+        encoder.decode(hoist_plain, hoist_out);
+
+        for (size_t i = 0; i < slot_size; i++)
+        {
+            EXPECT_NEAR(ref_out[i].real(), hoist_out[i].real(), 1.0) << "Mismatch at slot " << i << " (real)";
+            EXPECT_NEAR(ref_out[i].imag(), hoist_out[i].imag(), 1.0) << "Mismatch at slot " << i << " (imag)";
+
+            // Also verify against expected rotation result
+            size_t src = (i + step) % slot_size;
+            EXPECT_NEAR(round(ref_out[i].real()), input[src].real(), 0.5) << "Rotation wrong at slot " << i;
+        }
+    }
+
+    // TODO: Remove
+    // TEST(EvaluatorTest, CKKSHoistedVsNonHoistedKeySwitch)
+    // {
+    //     EncryptionParameters parms(scheme_type::ckks);
+
+    //     size_t slot_size = 8;
+    //     parms.set_poly_modulus_degree(slot_size * 2);
+    //     parms.set_coeff_modulus(CoeffModulus::Create(slot_size * 2, { 40, 40, 40, 40 }));
+
+    //     SEALContext context(parms, false, sec_level_type::none);
+    //     KeyGenerator keygen(context);
+
+    //     PublicKey pk;
+    //     keygen.create_public_key(pk);
+
+    //     GaloisKeys glk;
+    //     keygen.create_galois_keys(glk);
+
+    //     Encryptor encryptor(context, pk);
+    //     Evaluator evaluator(context);
+    //     Decryptor decryptor(context, keygen.secret_key());
+    //     CKKSEncoder encoder(context);
+
+    //     const double delta = static_cast<double>(1ULL << 30);
+
+    //     vector<complex<double>> input(slot_size);
+    //     for (size_t i = 0; i < slot_size; i++)
+    //     {
+    //         input[i] = complex<double>(i + 1, i + 1);
+    //     }
+
+    //     Plaintext plain;
+    //     Ciphertext encrypted;
+
+    //     encoder.encode(input, context.first_parms_id(), delta, plain);
+    //     encryptor.encrypt(plain, encrypted);
+
+    //     int shift = 1;
+
+    //     // -------------------------
+    //     // STEP 1: Apply automorphism once
+    //     // -------------------------
+    //     Ciphertext rotated = encrypted;
+
+    //     size_t coeff_count = parms.poly_modulus_degree();
+    //     size_t coeff_modulus_size = parms.coeff_modulus().size();
+
+    //     MemoryPoolHandle pool = MemoryManager::GetPool();
+
+    //     SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
+
+    //     evaluator.apply_galois_automorphism(rotated, shift, temp);
+
+    //     // -------------------------
+    //     // STEP 3: Run BOTH paths
+    //     // -------------------------
+    //     // Start from SAME ciphertext
+    //     Ciphertext ref_ct = encrypted;
+    //     Ciphertext hoist_ct = encrypted;
+
+    //     // Allocate temps
+    //     SEAL_ALLOCATE_GET_RNS_ITER(temp_ref, coeff_count, coeff_modulus_size, pool);
+    //     SEAL_ALLOCATE_GET_RNS_ITER(temp_hoist, coeff_count, coeff_modulus_size, pool);
+
+    //     // Apply automorphism independently
+    //     evaluator.apply_galois_automorphism(ref_ct, shift, temp_ref);
+    //     evaluator.apply_galois_automorphism(hoist_ct, shift, temp_hoist);
+
+    //     std::cout << "Before switch key inplace\n";
+
+    //     std::cout << "coeff_count = " << coeff_count << std::endl;
+    //     std::cout << "coeff_modulus_size = " << coeff_modulus_size << std::endl;
+
+    //     std::cout << "temp ptr = " << temp << std::endl;
+    //     std::cout << "temp[0][0] = " << temp[0][0] << std::endl;
+
+    //     std::cout << "ref_ct size = " << ref_ct.size() << std::endl;
+
+    //     // Hoisted decomposition
+    //     std::vector<util::Pointer<uint64_t>> decomp;
+    //     evaluator.decompose_ntt(temp_hoist, decomp, pool);
+
+    //     util::ConstRNSIter ref_c1(ref_ct.data(1), coeff_count);
+    //     util::ConstRNSIter hoist_c1(hoist_ct.data(1), coeff_count);
+
+    //     evaluator.switch_key_inplace(
+    //         ref_ct, ref_c1, static_cast<const KSwitchKeys &>(glk), GaloisKeys::get_index(shift), pool);
+
+    //     std::cout << "Before switch key inplace (hoisted)" << std::endl;
+
+    //     evaluator.switch_key_inplace(
+    //         hoist_ct, hoist_c1, static_cast<const KSwitchKeys &>(glk), GaloisKeys::get_index(shift), pool, &decomp);
+
+    //     // -------------------------
+    //     // STEP 4: Decrypt both
+    //     // -------------------------
+    //     Plaintext ref_plain, hoist_plain;
+    //     vector<complex<double>> ref_out(slot_size), hoist_out(slot_size);
+
+    //     decryptor.decrypt(ref_ct, ref_plain);
+    //     decryptor.decrypt(hoist_ct, hoist_plain);
+
+    //     encoder.decode(ref_plain, ref_out);
+    //     encoder.decode(hoist_plain, hoist_out);
+
+    //     // -------------------------
+    //     // STEP 5: Compare
+    //     // -------------------------
+    //     for (size_t i = 0; i < slot_size; i++)
+    //     {
+    //         ASSERT_EQ(round(ref_out[i].real()), round(hoist_out[i].real()));
+    //         ASSERT_EQ(round(ref_out[i].imag()), round(hoist_out[i].imag()));
+    //     }
+    // }
 
     TEST(EvaluatorTest, CKKSEncryptRescaleRotateDecrypt)
     {

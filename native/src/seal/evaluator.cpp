@@ -2360,7 +2360,7 @@ namespace seal
     }
 
     inline void Evaluator::apply_galois_kernel(
-        const Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp, util::GaloisTool *galois_tool) const
+        const Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp, const util::GaloisTool *galois_tool) const
     {
         auto &context_data = *context_.get_context_data(encrypted.parms_id());
         auto &parms = context_data.parms();
@@ -2372,17 +2372,23 @@ namespace seal
         if (parms.scheme() == scheme_type::bfv)
         {
             galois_tool->apply_galois(encrypted_iter[0], coeff_modulus_size, galois_elt, coeff_modulus, temp);
+
+            // store c0 result in temp buffer 0 region (conceptually)
+            set_poly(temp, parms.poly_modulus_degree(), coeff_modulus_size, temp);
+
+            galois_tool->apply_galois(encrypted_iter[1], coeff_modulus_size, galois_elt, coeff_modulus, temp);
         }
         else if (parms.scheme() == scheme_type::ckks || parms.scheme() == scheme_type::bgv)
         {
             galois_tool->apply_galois_ntt(encrypted_iter[0], coeff_modulus_size, galois_elt, temp);
-        }
-        else
-        {
-            throw logic_error("scheme not implemented");
+
+            set_poly(temp, parms.poly_modulus_degree(), coeff_modulus_size, temp);
+
+            galois_tool->apply_galois_ntt(encrypted_iter[1], coeff_modulus_size, galois_elt, temp);
         }
     }
 
+    // TODO: I think we can remove this one
     inline void Evaluator::apply_galois_writeback(
         Ciphertext &encrypted, util::RNSIter temp, size_t coeff_count, size_t coeff_modulus_size) const
     {
@@ -2397,136 +2403,53 @@ namespace seal
     {
         auto &context_data = *context_.get_context_data(encrypted.parms_id());
         auto &parms = context_data.parms();
-
-        size_t coeff_count = parms.poly_modulus_degree();
-        size_t coeff_modulus_size = parms.coeff_modulus().size();
-
-        auto galois_tool = context_.key_context_data()->galois_tool();
-
-        apply_galois_kernel(encrypted, galois_elt, temp, galois_tool);
-
-        apply_galois_writeback(encrypted, temp, coeff_count, coeff_modulus_size);
-    }
-
-    // void Evaluator::apply_galois_automorphism(Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp) const
-    // {
-    //     auto &context_data = *context_.get_context_data(encrypted.parms_id());
-    //     auto &parms = context_data.parms();
-    //     auto &coeff_modulus = parms.coeff_modulus();
-    //     size_t coeff_count = parms.poly_modulus_degree();
-    //     size_t coeff_modulus_size = coeff_modulus.size();
-    //     size_t encrypted_size = encrypted.size();
-    //     // Use key_context_data where permutation tables exist since previous runs.
-    //     auto galois_tool = context_.key_context_data()->galois_tool();
-
-    //     // DO NOT CHANGE EXECUTION ORDER OF FOLLOWING SECTION
-    //     // BEGIN: Apply Galois for each ciphertext
-    //     // Execution order is sensitive, since apply_galois is not inplace!
-    //     if (parms.scheme() == scheme_type::bfv)
-    //     {
-    //         // !!! DO NOT CHANGE EXECUTION ORDER!!!
-
-    //         // First transform encrypted.data(0)
-    //         auto encrypted_iter = iter(encrypted);
-    //         galois_tool->apply_galois(encrypted_iter[0], coeff_modulus_size, galois_elt, coeff_modulus, temp);
-
-    //         // Copy result to encrypted.data(0)
-    //         set_poly(temp, coeff_count, coeff_modulus_size, encrypted.data(0));
-
-    //         // Next transform encrypted.data(1)
-    //         galois_tool->apply_galois(encrypted_iter[1], coeff_modulus_size, galois_elt, coeff_modulus, temp);
-    //     }
-    //     else if (parms.scheme() == scheme_type::ckks || parms.scheme() == scheme_type::bgv)
-    //     {
-    //         // !!! DO NOT CHANGE EXECUTION ORDER!!!
-
-    //         // First transform encrypted.data(0)
-    //         auto encrypted_iter = iter(encrypted);
-    //         galois_tool->apply_galois_ntt(encrypted_iter[0], coeff_modulus_size, galois_elt, temp);
-
-    //         // Copy result to encrypted.data(0)
-    //         set_poly(temp, coeff_count, coeff_modulus_size, encrypted.data(0));
-
-    //         // Next transform encrypted.data(1)
-    //         galois_tool->apply_galois_ntt(encrypted_iter[1], coeff_modulus_size, galois_elt, temp);
-    //     }
-    //     else
-    //     {
-    //         throw logic_error("scheme not implemented");
-    //     }
-
-    //     // Wipe encrypted.data(1)
-    //     set_zero_poly(coeff_count, coeff_modulus_size, encrypted.data(1));
-    // }
-
-    void Evaluator::apply_galois_inplace(
-        Ciphertext &encrypted, uint32_t galois_elt, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
-    {
-        // Verify parameters.
-        if (!is_metadata_valid_for(encrypted, context_) || !is_buffer_valid(encrypted))
-        {
-            throw invalid_argument("encrypted is not valid for encryption parameters");
-        }
-
-        // Don't validate all of galois_keys but just check the parms_id.
-        if (galois_keys.parms_id() != context_.key_parms_id())
-        {
-            throw invalid_argument("galois_keys is not valid for encryption parameters");
-        }
-
-        auto &context_data = *context_.get_context_data(encrypted.parms_id());
-        auto &parms = context_data.parms();
         auto &coeff_modulus = parms.coeff_modulus();
-
         size_t coeff_count = parms.poly_modulus_degree();
         size_t coeff_modulus_size = coeff_modulus.size();
         size_t encrypted_size = encrypted.size();
+        // Use key_context_data where permutation tables exist since previous runs.
+        auto galois_tool = context_.key_context_data()->galois_tool();
 
-        // Size check
-        if (!product_fits_in(coeff_count, coeff_modulus_size))
+        // DO NOT CHANGE EXECUTION ORDER OF FOLLOWING SECTION
+        // BEGIN: Apply Galois for each ciphertext
+        // Execution order is sensitive, since apply_galois is not inplace!
+        if (parms.scheme() == scheme_type::bfv)
         {
-            throw logic_error("invalid parameters");
+            // !!! DO NOT CHANGE EXECUTION ORDER!!!
+
+            // First transform encrypted.data(0)
+            auto encrypted_iter = iter(encrypted);
+            galois_tool->apply_galois(encrypted_iter[0], coeff_modulus_size, galois_elt, coeff_modulus, temp);
+
+            // Copy result to encrypted.data(0)
+            set_poly(temp, coeff_count, coeff_modulus_size, encrypted.data(0));
+
+            // Next transform encrypted.data(1)
+            galois_tool->apply_galois(encrypted_iter[1], coeff_modulus_size, galois_elt, coeff_modulus, temp);
+        }
+        else if (parms.scheme() == scheme_type::ckks || parms.scheme() == scheme_type::bgv)
+        {
+            // !!! DO NOT CHANGE EXECUTION ORDER!!!
+
+            // First transform encrypted.data(0)
+            auto encrypted_iter = iter(encrypted);
+            galois_tool->apply_galois_ntt(encrypted_iter[0], coeff_modulus_size, galois_elt, temp);
+
+            // Copy result to encrypted.data(0)
+            set_poly(temp, coeff_count, coeff_modulus_size, encrypted.data(0));
+
+            // Next transform encrypted.data(1)
+            galois_tool->apply_galois_ntt(encrypted_iter[1], coeff_modulus_size, galois_elt, temp);
+        }
+        else
+        {
+            throw logic_error("scheme not implemented");
         }
 
-        // Check if Galois key is generated or not.
-        if (!galois_keys.has_key(galois_elt))
-        {
-            throw invalid_argument("Galois key not present");
-        }
-
-        uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
-
-        // Verify parameters
-        if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
-        {
-            throw invalid_argument("Galois element is not valid");
-        }
-        if (encrypted_size > 2)
-        {
-            throw invalid_argument("encrypted size must be 2");
-        }
-
-        SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
-
-        apply_galois_automorphism(encrypted, galois_elt, temp); //  TODO: Uncomment
-
-        // TODO: Automomprhis
-        // END: Apply Galois for each ciphertext
-        // REORDERING IS SAFE NOW
-
-        // Calculate (temp * galois_key[0], temp * galois_key[1]) + (ct[0], 0)
-        switch_key_inplace(
-            encrypted, temp, static_cast<const KSwitchKeys &>(galois_keys), GaloisKeys::get_index(galois_elt), pool);
-#ifdef SEAL_THROW_ON_TRANSPARENT_CIPHERTEXT
-        // Transparent ciphertext output is not allowed.
-        if (encrypted.is_transparent())
-        {
-            throw logic_error("result ciphertext is transparent");
-        }
-#endif
+        // Wipe encrypted.data(1)
+        set_zero_poly(coeff_count, coeff_modulus_size, encrypted.data(1));
     }
 
-    // TODO: Use hoisting
     void Evaluator::apply_galois_many(
         const Ciphertext &encrypted, const std::vector<uint32_t> &galois_elts, const GaloisKeys &galois_keys,
         std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const
@@ -2558,9 +2481,17 @@ namespace seal
         destination.clear();
         destination.reserve(galois_elts.size());
 
+        std::vector<Pointer<uint64_t>> temp_buffers;
+        temp_buffers.reserve(galois_elts.size());
+
+        std::vector<std::vector<util::Pointer<uint64_t>>> all_decomps;
+        all_decomps.reserve(galois_elts.size());
+
         SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
 
-        // IMPORTANT: each rotation starts from SAME ciphertext
+        std::vector<Ciphertext> rotated_cts;
+        rotated_cts.reserve(galois_elts.size());
+
         for (auto galois_elt : galois_elts)
         {
             if (!galois_keys.has_key(galois_elt))
@@ -2569,117 +2500,55 @@ namespace seal
             }
 
             uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
-
             if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
             {
                 throw invalid_argument("Galois element is not valid");
             }
 
-            // Copy input ciphertext (CRITICAL: prevents chaining)
+            // Allocate buffer for rotated c1
+            util::Pointer<uint64_t> temp_buf = allocate_uint(coeff_count * coeff_modulus_size, pool);
+            util::RNSIter temp_iter(temp_buf.get(), coeff_count);
+
+            // Apply automorphism
             Ciphertext rotated = encrypted;
+            apply_galois_automorphism(rotated, galois_elt, temp_iter);
 
-            // 1. automorphism (this is the expensive part we will hoist later)
-            apply_galois_automorphism(rotated, galois_elt, temp);
+            std::cout << "[Before decompose] temp_iter[0..3]: ";
+            for (size_t k = 0; k < 4; k++)
+            {
+                std::cout << temp_iter[k] << " ";
+            }
+            std::cout << std::endl;
 
-            // 2. key switching
-            switch_key_inplace(
-                rotated, temp, static_cast<const KSwitchKeys &>(galois_keys), GaloisKeys::get_index(galois_elt), pool);
+            // 🔥 HOIST: compute decomposition ONCE here
+            std::vector<util::Pointer<uint64_t>> decomp;
+            decompose_ntt(temp_iter, decomp, pool);
 
+            // Store everything
+            temp_buffers.emplace_back(std::move(temp_buf));
+            all_decomps.emplace_back(std::move(decomp));
             destination.emplace_back(std::move(rotated));
         }
-    }
 
-    void Evaluator::rotate_internal(
-        Ciphertext &encrypted, int steps, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
-    {
-        auto context_data_ptr = context_.get_context_data(encrypted.parms_id());
-        if (!context_data_ptr)
+        for (size_t i = 0; i < galois_elts.size(); i++)
         {
-            throw invalid_argument("encrypted is not valid for encryption parameters");
-        }
-        if (!context_data_ptr->qualifiers().using_batching)
-        {
-            throw logic_error("encryption parameters do not support batching");
-        }
-        if (galois_keys.parms_id() != context_.key_parms_id())
-        {
-            throw invalid_argument("galois_keys is not valid for encryption parameters");
-        }
+            util::RNSIter temp_iter(temp_buffers[i].get(), coeff_count);
 
-        // Is there anything to do?
-        if (steps == 0)
-        {
-            return;
-        }
-
-        size_t coeff_count = context_data_ptr->parms().poly_modulus_degree();
-        auto galois_tool = context_data_ptr->galois_tool();
-
-        // Check if Galois key is generated or not.
-        if (galois_keys.has_key(galois_tool->get_elt_from_step(steps)))
-        {
-            // Perform rotation and key switching
-            apply_galois_inplace(encrypted, galois_tool->get_elt_from_step(steps), galois_keys, std::move(pool));
-        }
-        else
-        {
-            // Convert the steps to NAF: guarantees using smallest HW
-            vector<int> naf_steps = naf(steps);
-
-            // If naf_steps contains only one element, then this is a power-of-two
-            // rotation and we would have expected not to get to this part of the
-            // if-statement.
-            if (naf_steps.size() == 1)
-            {
-                throw invalid_argument("Galois key not present");
-            }
-
-            SEAL_ITERATE(naf_steps.cbegin(), naf_steps.size(), [&](auto step) {
-                // We might have a NAF-term of size coeff_count / 2; this corresponds
-                // to no rotation so we skip it. Otherwise call rotate_internal.
-                if (safe_cast<size_t>(abs(step)) != (coeff_count >> 1))
-                {
-                    // Apply rotation for this step
-                    this->rotate_internal(encrypted, step, galois_keys, pool);
-                }
-            });
+            switch_key_inplace(
+                destination[i], temp_iter, static_cast<const KSwitchKeys &>(galois_keys),
+                GaloisKeys::get_index(galois_elts[i]), pool);
+            // switch_key_inplace(
+            //     destination[i], temp_iter, static_cast<const KSwitchKeys &>(galois_keys),
+            //     GaloisKeys::get_index(galois_elts[i]), pool,
+            //     &all_decomps[i] // 🔥 THIS is the hoisting
+            // );
         }
     }
 
-    void Evaluator::rotate_many_internal(
-        const Ciphertext &encrypted, const std::vector<int> &steps, const GaloisKeys &galois_keys,
-        std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const
-    {
-        auto context_data_ptr = context_.get_context_data(encrypted.parms_id());
-        if (!context_data_ptr)
-        {
-            throw invalid_argument("encrypted is not valid for encryption parameters");
-        }
-        if (!context_data_ptr->qualifiers().using_batching)
-        {
-            throw logic_error("encryption parameters do not support batching");
-        }
-        if (galois_keys.parms_id() != context_.key_parms_id())
-        {
-            throw invalid_argument("galois_keys is not valid for encryption parameters");
-        }
-
-        auto galois_tool = context_data_ptr->galois_tool();
-
-        std::vector<uint32_t> elts;
-        elts.reserve(steps.size());
-
-        for (auto step : steps)
-        {
-            elts.push_back(galois_tool->get_elt_from_step(step));
-        }
-
-        apply_galois_many(encrypted, elts, galois_keys, destination, pool);
-    }
-
+    // TODO: Remove all params in this code
     void Evaluator::switch_key_inplace(
         Ciphertext &encrypted, ConstRNSIter target_iter, const KSwitchKeys &kswitch_keys, size_t kswitch_keys_index,
-        MemoryPoolHandle pool) const
+        MemoryPoolHandle pool, std::vector<util::Pointer<uint64_t>> *precomp, bool save_precomp) const
     {
         auto parms_id = encrypted.parms_id();
         auto &context_data = *context_.get_context_data(parms_id);
@@ -2757,6 +2626,8 @@ namespace seal
             }
         }
 
+        std::vector<util::Pointer<uint64_t>> local_decomp;
+
         // Create a copy of target_iter
         SEAL_ALLOCATE_GET_RNS_ITER(t_target, coeff_count, decomp_modulus_size, pool);
         set_uint(target_iter, decomp_modulus_size * coeff_count, t_target);
@@ -2770,8 +2641,16 @@ namespace seal
         // Temporary result
         auto t_poly_prod(allocate_zero_poly_array(key_component_count, coeff_count, rns_modulus_size, pool));
 
+        if (save_precomp && precomp)
+        {
+            precomp->resize(decomp_modulus_size);
+            std::cout << "Resizing to " << decomp_modulus_size << std::endl;
+        }
+
         SEAL_ITERATE(iter(size_t(0)), rns_modulus_size, [&](auto I) {
             size_t key_index = (I == decomp_modulus_size ? key_modulus_size - 1 : I);
+
+            std::cout << "I =" << I << std::endl;
 
             // Product of two numbers is up to 60 + 60 = 120 bits, so we can sum up to 256 of them without reduction.
             size_t lazy_reduction_summand_bound = size_t(SEAL_MULTIPLY_ACCUMULATE_USER_MOD_MAX);
@@ -2788,28 +2667,72 @@ namespace seal
                 SEAL_ALLOCATE_GET_COEFF_ITER(t_ntt, coeff_count, pool);
                 ConstCoeffIter t_operand;
 
+                // TODO: Remove print
+
                 // RNS-NTT form exists in input
                 if ((scheme == scheme_type::ckks || scheme == scheme_type::bgv) && (I == J))
                 {
                     t_operand = target_iter[J];
                 }
-                // Perform RNS-NTT conversion
-                else
+                else if (save_precomp)
                 {
-                    // No need to perform RNS conversion (modular reduction)
+                    std::cout << "\n[COMPUTING PRECOMP PATH]\n";
+
+                    std::cout << "[REF BEFORE NTT J=" << J << "] ";
+                    for (size_t k = 0; k < 4; k++)
+                    {
+                        std::cout << t_target[J][k] << " ";
+                    }
+                    std::cout << std::endl;
+
+                    // original path
                     if (key_modulus[J] <= key_modulus[key_index])
                     {
                         set_uint(t_target[J], coeff_count, t_ntt);
                     }
-                    // Perform RNS conversion (modular reduction)
                     else
                     {
                         modulo_poly_coeffs(t_target[J], coeff_count, key_modulus[key_index], t_ntt);
                     }
-                    // NTT conversion lazy outputs in [0, 4q)
+
                     ntt_negacyclic_harvey_lazy(t_ntt, key_ntt_tables[key_index]);
                     t_operand = t_ntt;
+
+                    std::cout << "[AFTER NTT (t_operand) J=" << J << "] ";
+                    for (size_t k = 0; k < 4; k++)
+                    {
+                        std::cout << t_ntt[k] << " ";
+                    }
+                    std::cout << std::endl;
+
+                    // Save
+
+                    (*precomp)[J] = allocate<uint64_t>(coeff_count, pool);
+                    set_uint(t_operand, coeff_count, (*precomp)[J].get());
+                    std::cout << "Allocating to precomput J = " << J << std::endl;
                 }
+                else
+                {
+                    std::cout << "\n[PRECOMP ALREADY COMPUTED PATH]\n";
+
+                    std::cout << "[HOISTED (precomp) J=" << J << "] ";
+                    for (size_t k = 0; k < 4; k++)
+                    {
+                        std::cout << (*precomp)[J].get()[k] << " ";
+                    }
+                    std::cout << std::endl;
+                    t_operand = (*precomp)[J].get();
+                }
+
+                // if (I == 0 && J == 0)
+                // {
+                //     std::cout << "[Operand] first 4 coeffs: ";
+                //     for (size_t k = 0; k < 4; k++)
+                //     {
+                //         std::cout << t_operand[k] << " ";
+                //     }
+                //     std::cout << std::endl;
+                // }
 
                 // Multiply with keys and modular accumulate products in a lazy fashion
                 SEAL_ITERATE(iter(key_vector[J].data(), accumulator_iter), key_component_count, [&](auto K) {
@@ -2846,6 +2769,16 @@ namespace seal
 
             // PolyIter pointing to the destination t_poly_prod, shifted to the appropriate modulus
             PolyIter t_poly_prod_iter(t_poly_prod.get() + (I * coeff_count), coeff_count, rns_modulus_size);
+
+            // if (I == 0)
+            // {
+            //     std::cout << "[Accumulator] first 4 coeffs: ";
+            //     for (size_t k = 0; k < 4; k++)
+            //     {
+            //         std::cout << accumulator_iter[0][k] << " ";
+            //     }
+            //     std::cout << std::endl;
+            // }
 
             // Final modular reduction
             SEAL_ITERATE(iter(accumulator_iter, t_poly_prod_iter), key_component_count, [&](auto K) {
@@ -2974,5 +2907,305 @@ namespace seal
                 });
             }
         });
+    }
+
+    // void Evaluator::apply_galois_automorphism(Ciphertext &encrypted, uint32_t galois_elt, util::RNSIter temp) const
+    // {
+    //     auto &context_data = *context_.get_context_data(encrypted.parms_id());
+    //     auto &parms = context_data.parms();
+
+    //     size_t coeff_count = parms.poly_modulus_degree();
+    //     size_t coeff_modulus_size = parms.coeff_modulus().size();
+
+    //     auto galois_tool = context_.key_context_data()->galois_tool();
+
+    //     apply_galois_kernel(encrypted, galois_elt, temp, galois_tool);
+
+    //     apply_galois_writeback(encrypted, temp, coeff_count, coeff_modulus_size);
+    // }
+
+    // TODO: Use hoisting
+    // void Evaluator::apply_galois_many(
+    //     const Ciphertext &encrypted, const std::vector<uint32_t> &galois_elts, const GaloisKeys &galois_keys,
+    //     std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const
+    // {
+    //     // Verify parameters (same as single version)
+    //     auto &context_data = *context_.get_context_data(encrypted.parms_id());
+    //     auto &parms = context_data.parms();
+    //     auto &coeff_modulus = parms.coeff_modulus();
+
+    //     size_t coeff_count = parms.poly_modulus_degree();
+    //     size_t coeff_modulus_size = coeff_modulus.size();
+    //     size_t encrypted_size = encrypted.size();
+
+    //     if (!product_fits_in(coeff_count, coeff_modulus_size))
+    //     {
+    //         throw logic_error("invalid parameters");
+    //     }
+
+    //     if (galois_keys.parms_id() != context_.key_parms_id())
+    //     {
+    //         throw invalid_argument("galois_keys is not valid for encryption parameters");
+    //     }
+
+    //     if (encrypted_size > 2)
+    //     {
+    //         throw invalid_argument("encrypted size must be 2");
+    //     }
+
+    //     destination.clear();
+    //     destination.reserve(galois_elts.size());
+
+    //     SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
+
+    //     // TODO: Remove all commented code
+    //     // IMPORTANT: each rotation starts from SAME ciphertext
+    //     // for (auto galois_elt : galois_elts)
+    //     // {
+    //     //     if (!galois_keys.has_key(galois_elt))
+    //     //     {
+    //     //         throw invalid_argument("Galois key not present");
+    //     //     }
+
+    //     //     uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
+
+    //     //     if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
+    //     //     {
+    //     //         throw invalid_argument("Galois element is not valid");
+    //     //     }
+
+    //     //     // Copy input ciphertext (CRITICAL: prevents chaining)
+    //     //     Ciphertext rotated = encrypted;
+
+    //     //     // 1. automorphism (this is the expensive part we will hoist later)
+    //     //     apply_galois_automorphism(rotated, galois_elt, temp);
+
+    //     //     // 2. key switching
+    //     //     switch_key_inplace(
+    //     //         rotated, temp, static_cast<const KSwitchKeys &>(galois_keys), GaloisKeys::get_index(galois_elt),
+    //     //         pool);
+
+    //     //     destination.emplace_back(std::move(rotated));
+    //     // }
+
+    //     std::vector<Ciphertext> rotated_cts;
+    //     rotated_cts.reserve(galois_elts.size());
+
+    //     for (auto galois_elt : galois_elts)
+    //     {
+    //         Ciphertext rotated = encrypted;
+    //         apply_galois_automorphism(rotated, galois_elt, temp);
+    //         rotated_cts.emplace_back(std::move(rotated));
+    //     }
+
+    //     for (size_t i = 0; i < galois_elts.size(); i++)
+    //     {
+    //         switch_key_inplace(
+    //             rotated_cts[i], temp, static_cast<const KSwitchKeys &>(galois_keys),
+    //             GaloisKeys::get_index(galois_elts[i]), pool);
+
+    //         destination.emplace_back(std::move(rotated_cts[i]));
+    //     }
+    // }
+
+    void Evaluator::apply_galois_inplace(
+        Ciphertext &encrypted, uint32_t galois_elt, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
+    {
+        // Verify parameters.
+        if (!is_metadata_valid_for(encrypted, context_) || !is_buffer_valid(encrypted))
+        {
+            throw invalid_argument("encrypted is not valid for encryption parameters");
+        }
+
+        // Don't validate all of galois_keys but just check the parms_id.
+        if (galois_keys.parms_id() != context_.key_parms_id())
+        {
+            throw invalid_argument("galois_keys is not valid for encryption parameters");
+        }
+
+        auto &context_data = *context_.get_context_data(encrypted.parms_id());
+        auto &parms = context_data.parms();
+        auto &coeff_modulus = parms.coeff_modulus();
+
+        size_t coeff_count = parms.poly_modulus_degree();
+        size_t coeff_modulus_size = coeff_modulus.size();
+        size_t encrypted_size = encrypted.size();
+
+        // Size check
+        if (!product_fits_in(coeff_count, coeff_modulus_size))
+        {
+            throw logic_error("invalid parameters");
+        }
+
+        // Check if Galois key is generated or not.
+        if (!galois_keys.has_key(galois_elt))
+        {
+            throw invalid_argument("Galois key not present");
+        }
+
+        uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
+
+        // Verify parameters
+        if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
+        {
+            throw invalid_argument("Galois element is not valid");
+        }
+        if (encrypted_size > 2)
+        {
+            throw invalid_argument("encrypted size must be 2");
+        }
+
+        SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
+
+        apply_galois_automorphism(encrypted, galois_elt, temp); //  TODO: Uncomment
+
+        // TODO: Automomprhis
+        // END: Apply Galois for each ciphertext
+        // REORDERING IS SAFE NOW
+
+        // Calculate (temp * galois_key[0], temp * galois_key[1]) + (ct[0], 0)
+        switch_key_inplace(
+            encrypted, temp, static_cast<const KSwitchKeys &>(galois_keys), GaloisKeys::get_index(galois_elt), pool);
+#ifdef SEAL_THROW_ON_TRANSPARENT_CIPHERTEXT
+        // Transparent ciphertext output is not allowed.
+        if (encrypted.is_transparent())
+        {
+            throw logic_error("result ciphertext is transparent");
+        }
+#endif
+    }
+
+    void Evaluator::rotate_internal(
+        Ciphertext &encrypted, int steps, const GaloisKeys &galois_keys, MemoryPoolHandle pool) const
+    {
+        auto context_data_ptr = context_.get_context_data(encrypted.parms_id());
+        if (!context_data_ptr)
+        {
+            throw invalid_argument("encrypted is not valid for encryption parameters");
+        }
+        if (!context_data_ptr->qualifiers().using_batching)
+        {
+            throw logic_error("encryption parameters do not support batching");
+        }
+        if (galois_keys.parms_id() != context_.key_parms_id())
+        {
+            throw invalid_argument("galois_keys is not valid for encryption parameters");
+        }
+
+        // Is there anything to do?
+        if (steps == 0)
+        {
+            return;
+        }
+
+        size_t coeff_count = context_data_ptr->parms().poly_modulus_degree();
+        auto galois_tool = context_data_ptr->galois_tool();
+
+        // Check if Galois key is generated or not.
+        if (galois_keys.has_key(galois_tool->get_elt_from_step(steps)))
+        {
+            // Perform rotation and key switching
+            apply_galois_inplace(encrypted, galois_tool->get_elt_from_step(steps), galois_keys, std::move(pool));
+        }
+        else
+        {
+            // Convert the steps to NAF: guarantees using smallest HW
+            vector<int> naf_steps = naf(steps);
+
+            // If naf_steps contains only one element, then this is a power-of-two
+            // rotation and we would have expected not to get to this part of the
+            // if-statement.
+            if (naf_steps.size() == 1)
+            {
+                throw invalid_argument("Galois key not present");
+            }
+
+            SEAL_ITERATE(naf_steps.cbegin(), naf_steps.size(), [&](auto step) {
+                // We might have a NAF-term of size coeff_count / 2; this corresponds
+                // to no rotation so we skip it. Otherwise call rotate_internal.
+                if (safe_cast<size_t>(abs(step)) != (coeff_count >> 1))
+                {
+                    // Apply rotation for this step
+                    this->rotate_internal(encrypted, step, galois_keys, pool);
+                }
+            });
+        }
+    }
+
+    void Evaluator::rotate_many_internal(
+        const Ciphertext &encrypted, const std::vector<int> &steps, const GaloisKeys &galois_keys,
+        std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const
+    {
+        auto context_data_ptr = context_.get_context_data(encrypted.parms_id());
+        if (!context_data_ptr)
+        {
+            throw invalid_argument("encrypted is not valid for encryption parameters");
+        }
+        if (!context_data_ptr->qualifiers().using_batching)
+        {
+            throw logic_error("encryption parameters do not support batching");
+        }
+        if (galois_keys.parms_id() != context_.key_parms_id())
+        {
+            throw invalid_argument("galois_keys is not valid for encryption parameters");
+        }
+
+        auto galois_tool = context_data_ptr->galois_tool();
+
+        std::vector<uint32_t> elts;
+        elts.reserve(steps.size());
+
+        for (auto step : steps)
+        {
+            elts.push_back(galois_tool->get_elt_from_step(step));
+        }
+
+        apply_galois_many(encrypted, elts, galois_keys, destination, pool);
+    }
+
+    // TODO: Can we remove this function
+    void Evaluator::decompose_ntt(
+        util::ConstRNSIter target_iter, std::vector<util::Pointer<std::uint64_t>> &decomp_ntt,
+        MemoryPoolHandle pool) const
+    {
+        auto &key_context_data = *context_.key_context_data();
+        auto &key_parms = key_context_data.parms();
+        auto &key_modulus = key_parms.coeff_modulus();
+        auto key_ntt_tables = iter(key_context_data.small_ntt_tables());
+
+        size_t coeff_count = key_parms.poly_modulus_degree();
+        size_t decomp_modulus_size = key_modulus.size() - 1;
+        size_t key_modulus_size = key_modulus.size();
+
+        auto scheme = context_.first_context_data()->parms().scheme();
+
+        // Step 1: copy input
+        SEAL_ALLOCATE_GET_RNS_ITER(t_target, coeff_count, decomp_modulus_size, pool);
+        set_uint(target_iter, decomp_modulus_size * coeff_count, t_target);
+
+        // Step 2: inverse NTT (CKKS/BGV)
+        if (scheme == scheme_type::ckks || scheme == scheme_type::bgv)
+        {
+            inverse_ntt_negacyclic_harvey(t_target, decomp_modulus_size, key_ntt_tables);
+        }
+
+        // Prepare output
+        decomp_ntt.clear();
+        decomp_ntt.reserve(decomp_modulus_size);
+
+        // Step 3: per-modulus decomposition + NTT
+        for (size_t J = 0; J < decomp_modulus_size; J++)
+        {
+            Pointer<uint64_t> buf = allocate_uint(coeff_count, pool);
+            CoeffIter t_ntt(buf.get());
+
+            // Copy
+            set_uint(t_target[J], coeff_count, t_ntt);
+
+            // NTT (lazy)
+            ntt_negacyclic_harvey_lazy(t_ntt, key_ntt_tables[J]);
+
+            decomp_ntt.emplace_back(std::move(buf));
+        }
     }
 } // namespace seal
