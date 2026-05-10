@@ -2592,7 +2592,7 @@ namespace seal
                 {
                     // This slot uses target_iter[J] directly during key switch
                     // (the I==J fast path in switch_key_inplace)
-                    hoisted_decomp[I][J] = nullptr;
+                    hoisted_decomp[I][J].release();
                     continue;
                 }
 
@@ -2631,25 +2631,22 @@ namespace seal
             for (size_t I = 0; I < rns_modulus_size; I++)
             {
                 permuted_decomp[I].resize(decomp_modulus_size);
-                size_t key_index = (I == decomp_modulus_size ? key_modulus_size - 1 : I);
 
                 for (size_t J = 0; J < decomp_modulus_size; J++)
                 {
                     if (I == J)
                     {
                         // Will be handled by the I==J fast path using target_iter[J]
-                        permuted_decomp[I][J] = nullptr;
+                        permuted_decomp[I][J].release();
                         continue;
                     }
 
                     permuted_decomp[I][J] = allocate<uint64_t>(coeff_count, pool);
-                    util::CoeffIter src(hoisted_decomp[I][J].get());
+                    util::ConstCoeffIter src(hoisted_decomp[I][J].get());
                     util::CoeffIter dst(permuted_decomp[I][J].get());
 
-                    // Apply galois permutation to the precomputed NTT values
-                    galois_tool->apply_galois_ntt_single(
-                        src, key_index, galois_elt, dst // hypothetical per-modulus variant
-                    );
+                    // Apply same NTT-domain index permutation as full-RNS apply_galois_ntt
+                    galois_tool->apply_galois_ntt(src, galois_elt, dst);
                 }
             }
 
@@ -2657,18 +2654,16 @@ namespace seal
             SEAL_ALLOCATE_GET_RNS_ITER(perm_c1_ntt, coeff_count, decomp_modulus_size, pool);
             galois_tool->apply_galois_ntt(encrypted_iter[1], decomp_modulus_size, galois_elt, perm_c1_ntt);
 
-            // Key switch using precomputed (permuted) decomposition
+            // Same c0/c1 layout as apply_galois_automorphism + switch_key_inplace:
+            // permuted c0 is the base ciphertext c0 before key switch accumulates on it.
             Ciphertext result_ct = encrypted;
+            galois_tool->apply_galois_ntt(encrypted_iter[0], decomp_modulus_size, galois_elt, temp_c0);
+            set_poly(temp_c0, coeff_count, decomp_modulus_size, result_ct.data(0));
             set_zero_poly(coeff_count, decomp_modulus_size, result_ct.data(1));
 
             switch_key_inplace(
                 result_ct, perm_c1_ntt, static_cast<const KSwitchKeys &>(galois_keys),
-                GaloisKeys::get_index(galois_elt), pool, &permuted_decomp, false // use precomp, don't save
-            );
-
-            // Add permuted c0
-            galois_tool->apply_galois_ntt(encrypted_iter[0], decomp_modulus_size, galois_elt, temp_c0);
-            add_poly_coeffmod(temp_c0, iter(result_ct)[0], decomp_modulus_size, coeff_modulus, iter(result_ct)[0]);
+                GaloisKeys::get_index(galois_elt), pool, &permuted_decomp, false);
 
             destination.emplace_back(std::move(result_ct));
         }
