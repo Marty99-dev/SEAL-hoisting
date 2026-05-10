@@ -1320,7 +1320,7 @@ namespace seal
         void switch_key_inplace(
             Ciphertext &encrypted, util::ConstRNSIter target_iter, const KSwitchKeys &kswitch_keys,
             std::size_t key_index, MemoryPoolHandle pool = MemoryManager::GetPool(),
-             std::vector<std::vector<util::Pointer<uint64_t>>> *precomp = nullptr,  bool save_precomp = false) const;
+            std::vector<std::vector<util::Pointer<uint64_t>>> *precomp = nullptr, bool save_precomp = false) const;
 
         void decompose_ntt(
             util::ConstRNSIter target_iter, std::vector<util::Pointer<std::uint64_t>> &decomp_ntt,
@@ -1398,6 +1398,9 @@ namespace seal
 
         void apply_galois_writeback(
             Ciphertext &encrypted, util::RNSIter temp, size_t coeff_count, size_t coeff_modulus_size) const;
+
+        std::vector<std::vector<util::Pointer<uint64_t>>> precompute_key_switch(
+            util::ConstRNSIter target_iter, const Ciphertext &encrypted, MemoryPoolHandle pool) const;
 
         SEALContext context_;
     };

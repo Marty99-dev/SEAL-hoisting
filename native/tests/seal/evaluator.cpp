@@ -4216,6 +4216,7 @@ namespace sealtest
                 ASSERT_EQ(-input[i].imag(), round(output[i].imag()));
             }
 
+            // TODO: Move these test
             // -------------------------
             // NEW: rotate_vector_many test
             // -------------------------

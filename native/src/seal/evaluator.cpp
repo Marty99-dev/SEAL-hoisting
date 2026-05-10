@@ -2450,94 +2450,303 @@ namespace seal
         set_zero_poly(coeff_count, coeff_modulus_size, encrypted.data(1));
     }
 
+    // TODO: "Working"
+    // void Evaluator::apply_galois_many(
+    //     const Ciphertext &encrypted, const std::vector<uint32_t> &galois_elts, const GaloisKeys &galois_keys,
+    //     std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const
+    // {
+    //     // Verify parameters (same as single version)
+    //     auto &context_data = *context_.get_context_data(encrypted.parms_id());
+    //     auto &parms = context_data.parms();
+    //     auto &coeff_modulus = parms.coeff_modulus();
+
+    //     size_t coeff_count = parms.poly_modulus_degree();
+    //     size_t coeff_modulus_size = coeff_modulus.size();
+    //     size_t encrypted_size = encrypted.size();
+
+    //     if (!product_fits_in(coeff_count, coeff_modulus_size))
+    //     {
+    //         throw logic_error("invalid parameters");
+    //     }
+
+    //     if (galois_keys.parms_id() != context_.key_parms_id())
+    //     {
+    //         throw invalid_argument("galois_keys is not valid for encryption parameters");
+    //     }
+
+    //     if (encrypted_size > 2)
+    //     {
+    //         throw invalid_argument("encrypted size must be 2");
+    //     }
+
+    //     destination.clear();
+    //     destination.reserve(galois_elts.size());
+
+    //     std::vector<Pointer<uint64_t>> temp_buffers;
+    //     temp_buffers.reserve(galois_elts.size());
+
+    //     SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
+
+    //     std::vector<Ciphertext> rotated_cts;
+    //     rotated_cts.reserve(galois_elts.size());
+
+    //     // Precomputed data
+    //     std::vector<std::vector<util::Pointer<uint64_t>>> decomp;
+
+    //     // Precompute during the first run
+    //     bool save_precomp = true;
+
+    //     for (auto galois_elt : galois_elts)
+    //     {
+    //         if (!galois_keys.has_key(galois_elt))
+    //         {
+    //             throw invalid_argument("Galois key not present");
+    //         }
+
+    //         uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
+    //         if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
+    //         {
+    //             throw invalid_argument("Galois element is not valid");
+    //         }
+
+    //         // Allocate buffer for rotated c1
+    //         util::Pointer<uint64_t> temp_buf = allocate_uint(coeff_count * coeff_modulus_size, pool);
+    //         util::RNSIter temp_iter(temp_buf.get(), coeff_count);
+
+    //         // Apply automorphism
+    //         Ciphertext rotated = encrypted;
+    //         apply_galois_automorphism(rotated, galois_elt, temp_iter);
+
+    //         // Store everything
+    //         temp_buffers.emplace_back(std::move(temp_buf));
+    //         destination.emplace_back(std::move(rotated));
+
+    //         util::RNSIter temp_iter_new(temp_buffers.back().get(), coeff_count);
+
+    //         std::cout << "galois_elt = " << galois_elt << "\n";
+    //         std::cout << "temp_iter_new[0][0:4] = ";
+
+    //         for (size_t k = 0; k < 4; k++)
+    //         {
+    //             std::cout << temp_iter_new[0][k] << " ";
+    //         }
+    //         std::cout << std::endl;
+
+    //         switch_key_inplace(
+    //             destination.back(), temp_iter_new, static_cast<const KSwitchKeys &>(galois_keys),
+    //             GaloisKeys::get_index(galois_elt), pool, &decomp, save_precomp);
+
+    //         // Only save during the first run
+    //         // save_precomp = false;
+    //     }
+    // }
+
     void Evaluator::apply_galois_many(
         const Ciphertext &encrypted, const std::vector<uint32_t> &galois_elts, const GaloisKeys &galois_keys,
         std::vector<Ciphertext> &destination, MemoryPoolHandle pool) const
     {
-        // Verify parameters (same as single version)
         auto &context_data = *context_.get_context_data(encrypted.parms_id());
         auto &parms = context_data.parms();
         auto &coeff_modulus = parms.coeff_modulus();
+        auto &key_context_data = *context_.key_context_data();
+        auto &key_parms = key_context_data.parms();
 
         size_t coeff_count = parms.poly_modulus_degree();
-        size_t coeff_modulus_size = coeff_modulus.size();
-        size_t encrypted_size = encrypted.size();
+        size_t decomp_modulus_size = coeff_modulus.size();
+        auto &key_modulus = key_parms.coeff_modulus();
+        size_t key_modulus_size = key_modulus.size();
+        size_t rns_modulus_size = decomp_modulus_size + 1;
+        auto key_ntt_tables = iter(key_context_data.small_ntt_tables());
+        auto galois_tool = context_.key_context_data()->galois_tool();
+        auto encrypted_iter = iter(encrypted);
 
-        if (!product_fits_in(coeff_count, coeff_modulus_size))
-        {
-            throw logic_error("invalid parameters");
-        }
-
-        if (galois_keys.parms_id() != context_.key_parms_id())
-        {
-            throw invalid_argument("galois_keys is not valid for encryption parameters");
-        }
-
-        if (encrypted_size > 2)
-        {
+        // Validate
+        if (encrypted.size() > 2)
             throw invalid_argument("encrypted size must be 2");
+        if (galois_keys.parms_id() != context_.key_parms_id())
+            throw invalid_argument("galois_keys is not valid for encryption parameters");
+
+        // ---------------------------------------------------------------- //
+        // HOISTING STEP: decompose c1 ONCE into [rns_modulus_size][decomp] //
+        // table of NTT-domain RNS digits. Each entry (I,J) stores:         //
+        //   NTT(c1[J] mod q_I) in normal (non-permuted) form.             //
+        // Cost: rns_modulus_size * decomp_modulus_size NTTs — paid once.  //
+        // ---------------------------------------------------------------- //
+
+        // First bring c1 to normal (non-NTT) domain
+        SEAL_ALLOCATE_GET_RNS_ITER(c1_normal, coeff_count, decomp_modulus_size, pool);
+        set_uint(encrypted_iter[1], decomp_modulus_size * coeff_count, c1_normal);
+        inverse_ntt_negacyclic_harvey(c1_normal, decomp_modulus_size, key_ntt_tables);
+
+        // Build decomposition table: hoisted_decomp[I][J] = NTT(c1[J] mod q_I)
+        // These are in NTT form under modulus q_I, NOT permuted yet.
+        std::vector<std::vector<util::Pointer<uint64_t>>> hoisted_decomp(rns_modulus_size);
+        for (size_t I = 0; I < rns_modulus_size; I++)
+        {
+            hoisted_decomp[I].resize(decomp_modulus_size);
+            size_t key_index = (I == decomp_modulus_size ? key_modulus_size - 1 : I);
+
+            for (size_t J = 0; J < decomp_modulus_size; J++)
+            {
+                if (I == J)
+                {
+                    // This slot uses target_iter[J] directly during key switch
+                    // (the I==J fast path in switch_key_inplace)
+                    hoisted_decomp[I][J] = nullptr;
+                    continue;
+                }
+
+                SEAL_ALLOCATE_GET_COEFF_ITER(t_ntt, coeff_count, pool);
+
+                if (key_modulus[J] <= key_modulus[key_index])
+                    set_uint(c1_normal[J], coeff_count, t_ntt);
+                else
+                    modulo_poly_coeffs(c1_normal[J], coeff_count, key_modulus[key_index], t_ntt);
+
+                ntt_negacyclic_harvey_lazy(t_ntt, key_ntt_tables[key_index]);
+
+                hoisted_decomp[I][J] = allocate<uint64_t>(coeff_count, pool);
+                set_uint(t_ntt, coeff_count, hoisted_decomp[I][J].get());
+            }
         }
 
+        // ---------------------------------------------------------------- //
+        // Per rotation: permute hoisted_decomp entries (cheap!) then       //
+        // key-switch. The expensive NTTs above are NOT repeated.           //
+        // ---------------------------------------------------------------- //
         destination.clear();
         destination.reserve(galois_elts.size());
 
-        std::vector<Pointer<uint64_t>> temp_buffers;
-        temp_buffers.reserve(galois_elts.size());
-
-        SEAL_ALLOCATE_GET_RNS_ITER(temp, coeff_count, coeff_modulus_size, pool);
-
-        std::vector<Ciphertext> rotated_cts;
-        rotated_cts.reserve(galois_elts.size());
-
-        // Precomputed data
-        std::vector<std::vector<util::Pointer<uint64_t>>> decomp;
-
-        // Precompute during the first run
-        bool save_precomp = true;
+        SEAL_ALLOCATE_GET_RNS_ITER(temp_c0, coeff_count, decomp_modulus_size, pool);
 
         for (auto galois_elt : galois_elts)
         {
             if (!galois_keys.has_key(galois_elt))
-            {
                 throw invalid_argument("Galois key not present");
-            }
 
-            uint64_t m = mul_safe(static_cast<uint64_t>(coeff_count), uint64_t(2));
-            if (!(galois_elt & 1) || unsigned_geq(galois_elt, m))
+            // Build permuted c1 in NTT form for this galois_elt.
+            // For each (I,J): σ_galois_elt(hoisted_decomp[I][J])
+            // This is just a coefficient permutation — no NTTs needed.
+            std::vector<std::vector<util::Pointer<uint64_t>>> permuted_decomp(rns_modulus_size);
+            for (size_t I = 0; I < rns_modulus_size; I++)
             {
-                throw invalid_argument("Galois element is not valid");
+                permuted_decomp[I].resize(decomp_modulus_size);
+                size_t key_index = (I == decomp_modulus_size ? key_modulus_size - 1 : I);
+
+                for (size_t J = 0; J < decomp_modulus_size; J++)
+                {
+                    if (I == J)
+                    {
+                        // Will be handled by the I==J fast path using target_iter[J]
+                        permuted_decomp[I][J] = nullptr;
+                        continue;
+                    }
+
+                    permuted_decomp[I][J] = allocate<uint64_t>(coeff_count, pool);
+                    util::CoeffIter src(hoisted_decomp[I][J].get());
+                    util::CoeffIter dst(permuted_decomp[I][J].get());
+
+                    // Apply galois permutation to the precomputed NTT values
+                    galois_tool->apply_galois_ntt_single(
+                        src, key_index, galois_elt, dst // hypothetical per-modulus variant
+                    );
+                }
             }
 
-            // Allocate buffer for rotated c1
-            util::Pointer<uint64_t> temp_buf = allocate_uint(coeff_count * coeff_modulus_size, pool);
-            util::RNSIter temp_iter(temp_buf.get(), coeff_count);
+            // Permute c1 in NTT form for the I==J fast path
+            SEAL_ALLOCATE_GET_RNS_ITER(perm_c1_ntt, coeff_count, decomp_modulus_size, pool);
+            galois_tool->apply_galois_ntt(encrypted_iter[1], decomp_modulus_size, galois_elt, perm_c1_ntt);
 
-            // Apply automorphism
-            Ciphertext rotated = encrypted;
-            apply_galois_automorphism(rotated, galois_elt, temp_iter);
-
-            // Store everything
-            temp_buffers.emplace_back(std::move(temp_buf));
-            destination.emplace_back(std::move(rotated));
-
-            util::RNSIter temp_iter_new(temp_buffers.back().get(), coeff_count);
-
-            std::cout << "galois_elt = " << galois_elt << "\n";
-            std::cout << "temp_iter_new[0][0:4] = ";
-
-            for (size_t k = 0; k < 4; k++)
-            {
-                std::cout << temp_iter_new[0][k] << " ";
-            }
-            std::cout << std::endl;
+            // Key switch using precomputed (permuted) decomposition
+            Ciphertext result_ct = encrypted;
+            set_zero_poly(coeff_count, decomp_modulus_size, result_ct.data(1));
 
             switch_key_inplace(
-                destination.back(), temp_iter_new, static_cast<const KSwitchKeys &>(galois_keys),
-                GaloisKeys::get_index(galois_elt), pool, &decomp, save_precomp);
+                result_ct, perm_c1_ntt, static_cast<const KSwitchKeys &>(galois_keys),
+                GaloisKeys::get_index(galois_elt), pool, &permuted_decomp, false // use precomp, don't save
+            );
 
-            // Only save during the first run
-            // save_precomp = false;
+            // Add permuted c0
+            galois_tool->apply_galois_ntt(encrypted_iter[0], decomp_modulus_size, galois_elt, temp_c0);
+            add_poly_coeffmod(temp_c0, iter(result_ct)[0], decomp_modulus_size, coeff_modulus, iter(result_ct)[0]);
+
+            destination.emplace_back(std::move(result_ct));
         }
+    }
+
+    // TODO: Make sure we split our many rotations test
+    // TODO: Apparently we can hoist more
+    // TODO: Change API:
+    // auto hc = evaluator.hoist(target_iter);
+
+    // evaluator.switch_key_hoisted(
+    //     encrypted,
+    //     hc,
+    //     kswitch_keys,
+    //     idx
+    // );
+    // and
+    // struct HoistedCipher
+    // {
+    //     parms_id_type parms_id;
+    //     size_t coeff_count;
+    //     size_t rns_modulus_size;
+    //     size_t decomp_modulus_size;
+
+    //     std::vector<std::vector<std::vector<uint64_t>>> data;
+    // };
+
+    std::vector<std::vector<util::Pointer<uint64_t>>> Evaluator::precompute_key_switch(
+        ConstRNSIter target_iter, // permuted c1 in NTT form
+        const Ciphertext &encrypted, MemoryPoolHandle pool) const
+    {
+        auto &context_data = *context_.get_context_data(encrypted.parms_id());
+        auto &parms = context_data.parms();
+        auto &key_context_data = *context_.key_context_data();
+        auto &key_parms = key_context_data.parms();
+        size_t coeff_count = parms.poly_modulus_degree();
+        size_t decomp_modulus_size = parms.coeff_modulus().size();
+        auto &key_modulus = key_parms.coeff_modulus();
+        size_t key_modulus_size = key_modulus.size();
+        size_t rns_modulus_size = decomp_modulus_size + 1;
+        auto key_ntt_tables = iter(key_context_data.small_ntt_tables());
+
+        // Convert target from NTT → normal domain
+        SEAL_ALLOCATE_GET_RNS_ITER(t_target, coeff_count, decomp_modulus_size, pool);
+        set_uint(target_iter, decomp_modulus_size * coeff_count, t_target);
+        inverse_ntt_negacyclic_harvey(t_target, decomp_modulus_size, key_ntt_tables);
+
+        // Allocate [rns_modulus_size][decomp_modulus_size] table
+        std::vector<std::vector<util::Pointer<uint64_t>>> table(rns_modulus_size);
+        for (size_t I = 0; I < rns_modulus_size; I++)
+        {
+            table[I].resize(decomp_modulus_size);
+            size_t key_index = (I == decomp_modulus_size ? key_modulus_size - 1 : I);
+
+            for (size_t J = 0; J < decomp_modulus_size; J++)
+            {
+                if (I == J)
+                {
+                    // This case uses target_iter[J] directly — no precomputation needed
+                    // Store a null pointer as sentinel; switch_key_inplace will use target_iter[J]
+                    table[I][J].release();
+                    continue;
+                }
+
+                SEAL_ALLOCATE_GET_COEFF_ITER(t_ntt, coeff_count, pool);
+
+                if (key_modulus[J] <= key_modulus[key_index])
+                    set_uint(t_target[J], coeff_count, t_ntt);
+                else
+                    modulo_poly_coeffs(t_target[J], coeff_count, key_modulus[key_index], t_ntt);
+
+                ntt_negacyclic_harvey_lazy(t_ntt, key_ntt_tables[key_index]);
+
+                table[I][J] = allocate<uint64_t>(coeff_count, pool);
+                set_uint(t_ntt, coeff_count, table[I][J].get());
+            }
+        }
+        return table;
     }
 
     // TODO: Remove all params in this code
@@ -2669,7 +2878,10 @@ namespace seal
                 // RNS-NTT form exists in input
                 if ((scheme == scheme_type::ckks || scheme == scheme_type::bgv) && (I == J))
                 {
-                    t_operand = target_iter[J];
+                    if ((scheme == scheme_type::ckks || scheme == scheme_type::bgv) && (I == J))
+                    {
+                        t_operand = target_iter[J];
+                    }
                 }
                 else if (save_precomp)
                 {
