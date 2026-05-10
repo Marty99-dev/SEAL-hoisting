@@ -4,6 +4,8 @@
 #include "seal/seal.h"
 #include "seal/util/rlwe.h"
 #include "bench.h"
+#include <algorithm>
+#include <numeric>
 
 using namespace benchmark;
 using namespace sealbench;
@@ -264,6 +266,83 @@ namespace sealbench
 
             state.ResumeTiming();
             bm_env->evaluator()->rotate_vector(ct[0], 1, bm_env->glk(), ct[2]);
+        }
+    }
+
+    namespace
+    {
+        constexpr int ckks_rotate_many_k = 10;
+
+        void prepare_ckks_rotate_many_steps(const shared_ptr<BMEnv> &bm_env, vector<int> &steps)
+        {
+            const size_t slot_count = bm_env->ckks_encoder()->slot_count();
+            const int max_step = std::max(1, static_cast<int>(slot_count / 2) - 1);
+            steps.resize(ckks_rotate_many_k);
+            std::iota(steps.begin(), steps.end(), 1);
+            for (int &s : steps)
+            {
+                if (s > max_step)
+                {
+                    s = max_step;
+                }
+            }
+        }
+    } // namespace
+
+    void bm_ckks_rotate_vector_many(State &state, shared_ptr<BMEnv> bm_env)
+    {
+        vector<Ciphertext> &ct = bm_env->ct();
+        vector<int> steps;
+        prepare_ckks_rotate_many_steps(bm_env, steps);
+
+        GaloisKeys full_glk;
+        bm_env->keygen()->create_galois_keys(steps, full_glk);
+
+        vector<Ciphertext> many_out;
+        many_out.reserve(ckks_rotate_many_k);
+
+        for (auto _ : state)
+        {
+            state.PauseTiming();
+            bm_env->randomize_ct_ckks(ct[0]);
+
+            state.ResumeTiming();
+            bm_env->evaluator()->rotate_vector_many(ct[0], steps, full_glk, many_out);
+            state.SetItemsProcessed(state.items_processed() + ckks_rotate_many_k);
+        }
+    }
+
+    void bm_ckks_rotate_vector_clone_loop(State &state, shared_ptr<BMEnv> bm_env)
+    {
+        vector<Ciphertext> &ct = bm_env->ct();
+        vector<int> steps;
+        prepare_ckks_rotate_many_steps(bm_env, steps);
+
+        GaloisKeys full_glk;
+        bm_env->keygen()->create_galois_keys(steps, full_glk);
+
+        const auto &ctx = bm_env->context();
+        vector<Ciphertext> clones(ckks_rotate_many_k);
+        for (auto &c : clones)
+        {
+            c.resize(ctx, 2);
+        }
+
+        for (auto _ : state)
+        {
+            state.PauseTiming();
+            bm_env->randomize_ct_ckks(ct[0]);
+            for (int i = 0; i < ckks_rotate_many_k; i++)
+            {
+                clones[i] = ct[0];
+            }
+
+            state.ResumeTiming();
+            for (int i = 0; i < ckks_rotate_many_k; i++)
+            {
+                bm_env->evaluator()->rotate_vector_inplace(clones[i], steps[i], full_glk);
+            }
+            state.SetItemsProcessed(state.items_processed() + ckks_rotate_many_k);
         }
     }
 } // namespace sealbench

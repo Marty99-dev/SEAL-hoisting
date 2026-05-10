@@ -2868,8 +2868,6 @@ namespace seal
                 SEAL_ALLOCATE_GET_COEFF_ITER(t_ntt, coeff_count, pool);
                 ConstCoeffIter t_operand;
 
-                // TODO: Remove print
-
                 // RNS-NTT form exists in input
                 if ((scheme == scheme_type::ckks || scheme == scheme_type::bgv) && (I == J))
                 {
@@ -2880,16 +2878,6 @@ namespace seal
                 }
                 else if (save_precomp)
                 {
-                    std::cout << "\n[COMPUTING PRECOMP PATH]\n";
-
-                    std::cout << "[REF BEFORE NTT I, J=" << I << ", " << J << "] ";
-                    for (size_t k = 0; k < 4; k++)
-                    {
-                        std::cout << t_target[J][k] << " ";
-                    }
-                    std::cout << std::endl;
-
-                    // original path
                     if (key_modulus[J] <= key_modulus[key_index])
                     {
                         set_uint(t_target[J], coeff_count, t_ntt);
@@ -2902,28 +2890,12 @@ namespace seal
                     ntt_negacyclic_harvey_lazy(t_ntt, key_ntt_tables[key_index]);
                     t_operand = t_ntt;
 
-                    std::cout << "[AFTER NTT (t_operand) J=" << J << "] ";
-                    for (size_t k = 0; k < 4; k++)
-                    {
-                        std::cout << t_ntt[k] << " ";
-                    }
-                    std::cout << std::endl;
-
                     // Save at [I][J]
                     (*precomp)[I][J] = allocate<uint64_t>(coeff_count, pool);
                     set_uint(t_operand, coeff_count, (*precomp)[I][J].get());
-                    std::cout << "Saving done" << std::endl;
                 }
                 else if (precomp && !save_precomp)
                 {
-                    std::cout << "\n[PRECOMP ALREADY COMPUTED PATH]\n";
-
-                    std::cout << "[HOISTED (precomp) I, J=" << I << "," << J << "] ";
-                    for (size_t k = 0; k < 4; k++)
-                    {
-                        std::cout << (*precomp)[I][J].get()[k] << " ";
-                    }
-                    std::cout << std::endl;
                     // Use precomputed value for this (I, J)
                     t_operand = (*precomp)[I][J].get();
                 }

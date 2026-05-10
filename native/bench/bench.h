@@ -425,4 +425,6 @@ namespace sealbench
     void bm_ckks_rescale_inplace(benchmark::State &state, std::shared_ptr<BMEnv> bm_env);
     void bm_ckks_relin_inplace(benchmark::State &state, std::shared_ptr<BMEnv> bm_env);
     void bm_ckks_rotate(benchmark::State &state, std::shared_ptr<BMEnv> bm_env);
+    void bm_ckks_rotate_vector_many(benchmark::State &state, std::shared_ptr<BMEnv> bm_env);
+    void bm_ckks_rotate_vector_clone_loop(benchmark::State &state, std::shared_ptr<BMEnv> bm_env);
 } // namespace sealbench

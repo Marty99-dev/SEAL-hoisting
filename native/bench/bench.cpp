@@ -217,6 +217,10 @@ namespace sealbench
         {
             SEAL_BENCHMARK_REGISTER(CKKS, n, log_q, EvaluateRelinInplace, bm_ckks_relin_inplace, bm_env_ckks);
             SEAL_BENCHMARK_REGISTER(CKKS, n, log_q, EvaluateRotate, bm_ckks_rotate, bm_env_ckks);
+            SEAL_BENCHMARK_REGISTER(
+                CKKS, n, log_q, EvaluateRotateVectorMany10, bm_ckks_rotate_vector_many, bm_env_ckks);
+            SEAL_BENCHMARK_REGISTER(
+                CKKS, n, log_q, EvaluateRotateVectorCloneLoop10, bm_ckks_rotate_vector_clone_loop, bm_env_ckks);
         }
         SEAL_BENCHMARK_REGISTER(UTIL, n, log_q, NTTForward, bm_util_ntt_forward, bm_env_bfv);
         SEAL_BENCHMARK_REGISTER(UTIL, n, log_q, NTTInverse, bm_util_ntt_inverse, bm_env_bfv);
