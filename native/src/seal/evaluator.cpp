@@ -2495,7 +2495,6 @@ namespace seal
         // Precompute during the first run
         bool save_precomp = true;
 
-
         for (auto galois_elt : galois_elts)
         {
             if (!galois_keys.has_key(galois_elt))
@@ -2517,19 +2516,27 @@ namespace seal
             Ciphertext rotated = encrypted;
             apply_galois_automorphism(rotated, galois_elt, temp_iter);
 
-
             // Store everything
             temp_buffers.emplace_back(std::move(temp_buf));
             destination.emplace_back(std::move(rotated));
 
             util::RNSIter temp_iter_new(temp_buffers.back().get(), coeff_count);
 
+            std::cout << "galois_elt = " << galois_elt << "\n";
+            std::cout << "temp_iter_new[0][0:4] = ";
+
+            for (size_t k = 0; k < 4; k++)
+            {
+                std::cout << temp_iter_new[0][k] << " ";
+            }
+            std::cout << std::endl;
+
             switch_key_inplace(
                 destination.back(), temp_iter_new, static_cast<const KSwitchKeys &>(galois_keys),
                 GaloisKeys::get_index(galois_elt), pool, &decomp, save_precomp);
 
             // Only save during the first run
-            save_precomp = false;
+            // save_precomp = false;
         }
     }
 
@@ -2642,8 +2649,6 @@ namespace seal
         SEAL_ITERATE(iter(size_t(0)), rns_modulus_size, [&](auto I) {
             size_t key_index = (I == decomp_modulus_size ? key_modulus_size - 1 : I);
 
-            std::cout << "I =" << I << std::endl;
-
             // Product of two numbers is up to 60 + 60 = 120 bits, so we can sum up to 256 of them without reduction.
             size_t lazy_reduction_summand_bound = size_t(SEAL_MULTIPLY_ACCUMULATE_USER_MOD_MAX);
             size_t lazy_reduction_counter = lazy_reduction_summand_bound;
@@ -2717,7 +2722,6 @@ namespace seal
                 }
                 else
                 {
-                    std::cout << "NOT HERE " << std::endl;
                     // Original non-hoisted path
                     if (key_modulus[J] <= key_modulus[key_index])
                         set_uint(t_target[J], coeff_count, t_ntt);
