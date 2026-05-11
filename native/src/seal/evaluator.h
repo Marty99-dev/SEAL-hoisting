@@ -1214,17 +1214,7 @@ namespace seal
             {
                 throw std::logic_error("unsupported scheme");
             }
-
-            auto galois_tool = context_.key_context_data()->galois_tool();
-
-            // TODO: Remove that
-            for (auto step : steps)
-            {
-                auto elt = galois_tool->get_elt_from_step(step);
-
-                std::cout << "step=" << step << " elt=" << elt << " has_key=" << galois_keys.has_key(elt) << std::endl;
-            }
-
+            
             rotate_many_internal(encrypted, steps, galois_keys, destination, std::move(pool));
         }
 
