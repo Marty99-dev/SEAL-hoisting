@@ -1213,7 +1213,7 @@ namespace seal
             {
                 throw std::logic_error("unsupported scheme");
             }
-
+            
             rotate_many_internal(encrypted, steps, galois_keys, destination, std::move(pool));
         }
 
